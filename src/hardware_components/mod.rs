@@ -1,3 +1,3 @@
 pub mod cartridge;
-pub mod cpu;
+pub mod sharp_lr35902;
 pub mod memory;
