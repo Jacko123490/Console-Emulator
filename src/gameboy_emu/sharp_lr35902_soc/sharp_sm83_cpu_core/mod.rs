@@ -1,6 +1,7 @@
-use super::registers::{CPURegisters};
-
 mod instructions;
+mod registers;
+
+use registers::CPURegisters;
 
 pub struct SharpSM83Core {
     registers: CPURegisters

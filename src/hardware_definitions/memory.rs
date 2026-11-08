@@ -1,5 +1,6 @@
 use std::error::Error;
 use std::fmt::{Display, Formatter, LowerHex};
+use std::iter::Sum;
 use std::mem;
 use std::ops::{Index, IndexMut};
 use num_traits::{PrimInt, Unsigned};
@@ -32,6 +33,8 @@ impl<AddressType: PrimInt + LowerHex> AddressRange<AddressType> {
         if lo > hi {  mem::swap(&mut lo, &mut hi); }
         AddressRange { hi, lo }
     }
+
+    pub fn len(&self) -> AddressType { self.hi - self.lo + AddressType::one() }
 
     pub fn in_range(&self, address: AddressType) -> bool {
         address >= self.lo && address <= self.hi
@@ -74,7 +77,7 @@ impl<AddressType: PrimInt + LowerHex> Display for AddressSpace<AddressType> {
     }
 }
 
-impl<AddressType: PrimInt + LowerHex> AddressSpace<AddressType> {
+impl<AddressType: PrimInt + LowerHex + Sum> AddressSpace<AddressType> {
     pub fn new(address_space: Vec<[AddressType; 2]>) -> AddressSpace<AddressType> {
         // Convert to array first
         let mut address_space: Vec<AddressRange<AddressType>> = address_space.into_iter()
@@ -83,6 +86,8 @@ impl<AddressType: PrimInt + LowerHex> AddressSpace<AddressType> {
         AddressSpace::collapse_space(&mut address_space);
         AddressSpace { address_space }
     }
+
+    pub fn len(&self) -> AddressType { self.address_space.iter().map(|x| x.len()).sum() }
 
     pub fn in_range(&self, address: AddressType) -> bool {
         for range in self.address_space.iter() {
@@ -176,6 +181,12 @@ mod tests {
         assert!(!test_range.in_range(6u8));
     }
 
+    #[test]
+    fn test_address_len() {
+        let test_range = AddressRange::new(1u8, 5u8);
+        assert_eq!(test_range.len(), 5);
+    }
+
     // AdressSpace unit tests
     /// Ensure all range overlap types collapse correctly, array should be sorted and collapsed
     #[test]
@@ -199,5 +210,12 @@ mod tests {
         assert!(addr_space.in_range(0x0100));
         assert!(!addr_space.in_range(0x0101));
         assert!(addr_space.in_range(0x0200));
+    }
+
+    #[test]
+    fn test_address_space_len() {
+        let ranges: Vec<[u16; 2]> = vec![[0x0001, 0x0100], [0x0200, 0x02ff]];
+        let addr_space = AddressSpace::new(ranges);
+        assert_eq!(addr_space.len(), 256 + 256);
     }
 }

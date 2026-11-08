@@ -2,7 +2,7 @@ use std::error::Error;
 use std::fmt::{Display, Formatter};
 use std::ops::{Index, IndexMut};
 
-use crate::hardware_components::memory::{AddressSpace, AddressableMemory};
+use crate::hardware_definitions::memory::{AddressSpace, AddressableMemory};
 
 #[derive(Debug)]
 pub enum BootRomError {
