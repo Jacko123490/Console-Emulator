@@ -1,9 +1,10 @@
 use std::error::Error;
-use std::fmt::{Display, Formatter, LowerHex};
+use std::fmt::{Debug, Display, Formatter, LowerHex};
 use std::iter::Sum;
 use std::mem;
-use std::ops::{Index, IndexMut};
-use num_traits::{PrimInt, Unsigned};
+use std::ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Rem, RemAssign, Sub, SubAssign};
+use std::slice;
+use num_traits::{Unsigned};
 
 #[derive(Debug)]
 pub enum MemoryError {
@@ -20,34 +21,69 @@ impl Display for MemoryError {
 
 impl Error for MemoryError {}
 
+// MemoryAddress
+// (Wrapper for uint types that could be used for memory addressing)
+// ----------------------------------------------------------------------------
+pub trait MemAddr:
+Sized
++ Copy
++ Eq
++ Ord
++ Add<Self, Output = Self>
++ Sub<Self, Output = Self>
++ Mul<Self, Output = Self>
++ Div<Self, Output = Self>
++ Rem<Self, Output = Self>
++ Sum
++ AddAssign<Self>
++ SubAssign<Self>
++ MulAssign<Self>
++ DivAssign<Self>
++ RemAssign<Self>
++ Debug
++ Display
++ LowerHex
++ From<u8>  // Guaranteed conversion for each type
+{}
+
+impl MemAddr for u8 {}
+impl MemAddr for u16 {}
+impl MemAddr for u32 {}
+impl MemAddr for u64 {}
+impl MemAddr for u128 {}
+impl MemAddr for usize {}
+
 // AddressRange
 // ----------------------------------------------------------------------------
+/// A range of memory addresses within a larger address space.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct AddressRange<AddressType: PrimInt> { // Ord + Display
+pub struct AddressRange<AddressType: MemAddr> { // Ord + Display
     hi: AddressType,
     lo: AddressType,
 }
 
-impl<AddressType: PrimInt + LowerHex> AddressRange<AddressType> {
+impl<AddressType: MemAddr> AddressRange<AddressType> {
     pub fn new(mut lo: AddressType, mut hi: AddressType) -> AddressRange<AddressType> {
         if lo > hi {  mem::swap(&mut lo, &mut hi); }
         AddressRange { hi, lo }
     }
 
-    pub fn len(&self) -> AddressType { self.hi - self.lo + AddressType::one() }
+    /// The number of addresses covered by this range.
+    pub fn len(&self) -> AddressType { self.hi - self.lo + AddressType::from(1) }
 
+    /// Whether the provided address is within the AddressRange.
     pub fn in_range(&self, address: AddressType) -> bool {
         address >= self.lo && address <= self.hi
     }
 }
 
-impl<AddressType: PrimInt + LowerHex> Display for AddressRange<AddressType> {
+impl<AddressType: MemAddr> Display for AddressRange<AddressType> {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         write!(f, "[{:#x},{:#x}]", self.lo, self.hi)
     }
 }
 
-impl<AddressType: PrimInt + LowerHex> TryFrom<&[AddressType]> for AddressRange<AddressType> {
+impl<AddressType: MemAddr> TryFrom<&[AddressType]> for AddressRange<AddressType> {
     type Error = MemoryError;
 
     fn try_from(value: &[AddressType]) -> Result<Self, Self::Error> {
@@ -61,24 +97,16 @@ impl<AddressType: PrimInt + LowerHex> TryFrom<&[AddressType]> for AddressRange<A
 
 // AddressSpace
 // ----------------------------------------------------------------------------
+/// A defined set of addresses within the global address space defined by 'AddressType'.
 #[derive(Debug, Clone, Eq, PartialEq)]
-pub struct AddressSpace<AddressType: PrimInt> {
+pub struct AddressSpace<AddressType: MemAddr> {
     address_space: Vec<AddressRange<AddressType>>,
 }
 
-impl<AddressType: PrimInt + LowerHex> Display for AddressSpace<AddressType> {
-    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
-        write!(f, "{}",
-               self.address_space.iter()
-                   .map(|x| x.to_string())
-                   .collect::<Vec<String>>()
-                   .join(",")
-        )
-    }
-}
-
-impl<AddressType: PrimInt + LowerHex + Sum> AddressSpace<AddressType> {
+impl<AddressType: MemAddr> AddressSpace<AddressType> {
     pub fn new(address_space: Vec<[AddressType; 2]>) -> AddressSpace<AddressType> {
+        if address_space.len() == 0 { panic!("Cannot create an AddressSpace from an empty vector.")}
+
         // Convert to array first
         let mut address_space: Vec<AddressRange<AddressType>> = address_space.into_iter()
             .map(|x| x[..].try_into().expect("Invalid AddressRange entry in address space."))
@@ -87,16 +115,7 @@ impl<AddressType: PrimInt + LowerHex + Sum> AddressSpace<AddressType> {
         AddressSpace { address_space }
     }
 
-    pub fn len(&self) -> AddressType { self.address_space.iter().map(|x| x.len()).sum() }
-
-    pub fn in_range(&self, address: AddressType) -> bool {
-        for range in self.address_space.iter() {
-            if range.in_range(address) { return true; }
-        }
-        false
-    }
-
-    /// Collapse address ranges with overlapping elements into a single address range
+    /// Collapse address ranges with overlapping elements into a single address range.
     fn collapse_space(address_space: &mut Vec<AddressRange<AddressType>>) {
         address_space.sort_by_key(|address| address.lo);
 
@@ -108,7 +127,7 @@ impl<AddressType: PrimInt + LowerHex + Sum> AddressSpace<AddressType> {
                 None => break,
             };
             // Combine overlapping or neighboring ranges
-            if next_range.lo <= current_range.hi + AddressType::one() {
+            if next_range.lo <= current_range.hi + AddressType::from(1) {
                 address_space[i] = AddressRange::new(
                     current_range.lo,  // Due to sorting, should always be lowest bound of overlapping ranges
                     current_range.hi.max(next_range.hi)  // Get the larger bound of overlapping ranges
@@ -119,9 +138,57 @@ impl<AddressType: PrimInt + LowerHex + Sum> AddressSpace<AddressType> {
             }
         }
     }
+
+    // Utility Methods
+    /// The number of addresses covered by this space.
+    pub fn len(&self) -> AddressType { self.address_space.iter().map(|x| x.len()).sum() }
+
+    /// Whether the provided address is within the AddressSpace.
+    pub fn in_range(&self, address: AddressType) -> bool {
+        for range in self.address_space.iter() {
+            if range.in_range(address) { return true; }
+        }
+        false
+    }
+
+    /// Get the global bounds of the address space
+    pub fn global_range(&self) -> AddressRange<AddressType> {
+        AddressRange::new(
+            self.address_space.first().expect("AddressSpace needs at least one element.").lo,
+            self.address_space.last().expect("AddressSpace needs at least one element.").hi
+        )
+    }
 }
 
-// Memory Traits
+impl<AddressType: MemAddr> Display for AddressSpace<AddressType> {
+    fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
+        write!(f, "{}",
+               self.address_space.iter()
+                   .map(|x| x.to_string())
+                   .collect::<Vec<String>>()
+                   .join(",")
+        )
+    }
+}
+
+impl<AddressType: MemAddr> Index<usize> for AddressSpace<AddressType> {
+    type Output = AddressRange<AddressType>;
+
+    fn index(&self, index: usize) -> &Self::Output {
+        &self.address_space[index]
+    }
+}
+
+impl<'a, AddressType: MemAddr> IntoIterator for &'a AddressSpace<AddressType> {
+    type Item = &'a AddressRange<AddressType>;
+    type IntoIter = slice::Iter<'a, AddressRange<AddressType>>;
+
+    fn into_iter(self) -> Self::IntoIter {
+        self.address_space.iter()
+    }
+}
+
+// Memory Implementations
 // ----------------------------------------------------------------------------
 pub trait AddressableMemory<AddressType, DataType>:
     Index<AddressType, Output = DataType> +
