@@ -5,16 +5,19 @@ use std::mem;
 use std::ops::{Add, AddAssign, Div, DivAssign, Index, IndexMut, Mul, MulAssign, Rem, RemAssign, Sub, SubAssign};
 use std::slice;
 use num_traits::{Unsigned};
+use rand::distr::{Distribution, StandardUniform};
 
 #[derive(Debug)]
 pub enum MemoryError {
     AddressRangeError(String),
+    AddressConversionError(String),
 }
 
 impl Display for MemoryError {
     fn fmt(&self, f: &mut Formatter<'_>) -> std::fmt::Result {
         match &self {
             MemoryError::AddressRangeError(msg) => { write!(f, "{msg}") },
+            MemoryError::AddressConversionError(msg) => { write!(f, "{msg}") }
         }
     }
 }
@@ -44,6 +47,7 @@ Sized
 + Display
 + LowerHex
 + From<u8>  // Guaranteed conversion for each type
++ TryInto<usize, Error: Debug>
 {}
 
 impl MemAddr for u8 {}
@@ -263,6 +267,93 @@ where AddressType: MemAddr, DataType: Unsigned,
     }
 }
 
+// Simple Memory Types
+// ----------------------------------------------------------------------------
+/// Representation of an array of Read Only Memory mapped within the address space
+///
+/// Generally comes as a pre-written collection of memory data provided as-is.
+pub struct ROM<AddressType: MemAddr, DataType: Unsigned, const SIZE: usize> {
+    data: Box<[DataType; SIZE]>,  // Raw memory data
+    memory_map: AddressSpace<AddressType>,
+}
+
+impl <AddressType: MemAddr, DataType: Unsigned, const SIZE: usize>
+ROM<AddressType, DataType, SIZE> {
+    pub fn new(data: Box<[DataType; SIZE]>, memory_map: AddressSpace<AddressType>) -> Result<Self, MemoryError> {
+        if SIZE != memory_map.len().try_into().expect("Memory Map too large for OS address-range.") {
+            return Err(MemoryError::AddressRangeError(
+                format!("Addressable data range {:#x} does not match size of provided address space mapping: {}", SIZE, memory_map)
+            ))
+        }
+        Ok(ROM { data, memory_map })
+    }
+}
+
+impl<AddressType: MemAddr, DataType: Unsigned, const SIZE: usize>
+Index<AddressType>
+for ROM<AddressType, DataType, SIZE> {
+    type Output = DataType;
+
+    fn index(&self, index: AddressType) -> &Self::Output { &self.data[index.try_into().expect("MemAddr too large for OS address-range.")] }
+}
+
+impl<AddressType: MemAddr, DataType: Unsigned, const SIZE: usize>
+MemoryMapR<AddressType, DataType>
+for ROM<AddressType, DataType, SIZE> {
+    fn address_space(&self) -> &AddressSpace<AddressType> { &self.memory_map }
+}
+
+/// Representation of an array of Random Access Memory mapped within the address space
+///
+/// Treated as a simple read-write addressable memory.
+/// Data initialised to either random data or single value.
+pub struct RAM<AddressType: MemAddr, DataType: Unsigned, const SIZE: usize> {
+    data: Box<[DataType; SIZE]>,  // Raw memory data
+    memory_map: AddressSpace<AddressType>,
+}
+
+impl <AddressType: MemAddr, DataType: Unsigned + Copy, const SIZE: usize>
+RAM<AddressType, DataType, SIZE> where StandardUniform: Distribution<DataType> {
+    pub fn new(init: Option<DataType>, memory_map: AddressSpace<AddressType>) -> Result<Self, MemoryError> {
+        let data: Box<[DataType; SIZE]> = match init {
+            Some(value) => { Box::new([value; SIZE]) }
+            None => {
+                let data: [DataType; SIZE] = std::array::from_fn(|_| rand::random());
+                Box::new(data)
+            }
+        };
+        if SIZE != memory_map.len().try_into().expect("Memory Map too large for OS address-range.") {
+            return Err(MemoryError::AddressRangeError(
+                format!("Addressable data range {:#x} does not match size of provided address space mapping: {}", SIZE, memory_map)
+            ))
+        }
+        Ok(RAM { data, memory_map })
+    }
+}
+
+impl<AddressType: MemAddr, DataType: Unsigned, const SIZE: usize>
+Index<AddressType>
+for RAM<AddressType, DataType, SIZE> {
+    type Output = DataType;
+    fn index(&self, index: AddressType) -> &Self::Output { &self.data[index.try_into().expect("MemAddr too large for OS address-range.")] }
+}
+
+impl<AddressType: MemAddr, DataType: Unsigned, const SIZE: usize>
+IndexMut<AddressType>
+for RAM<AddressType, DataType, SIZE> {
+    fn index_mut(&mut self, index: AddressType) -> &mut Self::Output { &mut self.data[index.try_into().expect("MemAddr too large for OS address-range.")] }
+}
+
+impl<AddressType: MemAddr, DataType: Unsigned, const SIZE: usize>
+MemoryMapR<AddressType, DataType>
+for RAM<AddressType, DataType, SIZE> {
+    fn address_space(&self) -> &AddressSpace<AddressType> { &self.memory_map }
+}
+
+impl<AddressType: MemAddr, DataType: Unsigned, const SIZE: usize>
+MemoryMapRW<AddressType, DataType>
+for RAM<AddressType, DataType, SIZE> {}
+
 // Unit Tests
 // ----------------------------------------------------------------------------
 #[cfg(test)]
@@ -318,7 +409,7 @@ mod tests {
         assert_eq!(test_range.len(), 5);
     }
 
-    // AdressSpace unit tests
+    // AddressSpace unit tests
     /// Ensure all range overlap types collapse correctly, array should be sorted and collapsed
     #[test]
     fn test_address_space_collapse() {
