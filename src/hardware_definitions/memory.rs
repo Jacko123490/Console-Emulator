@@ -126,10 +126,10 @@ impl<AddressType: MemAddr> AddressSpace<AddressType> {
                 Some(next_range) => next_range,
                 None => break,
             };
-            // Combine overlapping or neighboring ranges
+            // Combine overlapping or neighbouring ranges
             if next_range.lo <= current_range.hi + AddressType::from(1) {
                 address_space[i] = AddressRange::new(
-                    current_range.lo,  // Due to sorting, should always be lowest bound of overlapping ranges
+                    current_range.lo,  // Due to sorting, should always be the lowest bound of overlapping ranges
                     current_range.hi.max(next_range.hi)  // Get the larger bound of overlapping ranges
                 );
                 address_space.remove(i+1);  // Clear next element that we have merged with current one
@@ -190,20 +190,84 @@ impl<'a, AddressType: MemAddr> IntoIterator for &'a AddressSpace<AddressType> {
 
 // Memory Implementations
 // ----------------------------------------------------------------------------
-pub trait AddressableMemory<AddressType, DataType>:
-    Index<AddressType, Output = DataType> +
-    IndexMut<AddressType>
-where
-    AddressType: PrimInt + LowerHex,
-    DataType: Unsigned,
+/// Readonly bidirectional memory map from a global address space to the locally stored memory space.
+/// - The defined 'Index' trait should read the data using the local index.
+/// - The defined 'address_space' defines the range of global address values which can be read.
+/// The size of this space must match the size of the local address space.
+/// - The default behaviour is to map every local index to an available global index in ascending order.
+pub trait MemoryMapR<AddressType, DataType>: Index<AddressType, Output = DataType>
+where AddressType: MemAddr, DataType: Unsigned,
 {
+    /// The global 'AddressSpace' which is mapped to the local data.
     fn address_space(&self) -> &AddressSpace<AddressType>;
+
+    /// Map a global address to a local address. (if possible)
+    fn map_to(&self, address: AddressType) -> Result<AddressType, MemoryError> {
+        // Short circuit addresses out of bounds
+        let err_result = MemoryError::AddressRangeError(
+            format!(
+                "The global memory address: {address} does not lie within the mapped memory range: {}",
+                self.address_space()
+            )
+        );
+        if !self.address_space().global_range().in_range(address) {
+            return Err(err_result);
+        }
+
+        // Count addressable spaces up to final index
+        let mut in_range_flag = false;
+        let mut index: AddressType = AddressType::from(0);
+        for range in self.address_space().into_iter() {
+            if address > range.hi { index += range.len(); }  // Full address range counts index
+            else if address < range.lo { break; }  // If counting ranges above address, then address was not found in a previous range
+            else {  // Address is in range and we can count to final index
+                index += address - range.lo;
+                in_range_flag = true;
+                break;
+            }
+        }
+
+        // Return value if address was located
+        if !in_range_flag { Err(err_result) }
+        else { Ok(index) }
+    }
+
+    /// Map from a local address to a global one. (if possible)
+    fn map_from(&self, address: AddressType) -> Result<AddressType, MemoryError> {
+        let mut address = address.clone();
+        for range in self.address_space().into_iter() {
+            if address + AddressType::from(1) > range.len() {
+                address -= range.len();
+            } else {
+                return Ok(range.lo + address);
+            }
+        }
+        Err(MemoryError::AddressRangeError(
+            format!("The local address {address} is larger than the available 'AddressSpace' length: {}", self.address_space().len())
+        ))
+    }
+
+    /// Read the mapped memory data using a global address.
+    fn read(&self, address: AddressType) -> Result<&DataType, MemoryError> { Ok(self.index(self.map_to(address)?)) }
+}
+
+/// Read/Write bidirectional memory map from a global address space to the locally stored memory space.
+/// - The defined 'IndexMut' trait should update the data using the local index.
+///
+/// Extension of 'MemoryMapR' that allows writing
+pub trait MemoryMapRW<AddressType, DataType>: MemoryMapR<AddressType, DataType> + IndexMut<AddressType>
+where AddressType: MemAddr, DataType: Unsigned,
+{
+    fn write(&mut self, address: AddressType) -> Result<&mut DataType, MemoryError> {
+        Ok(self.index_mut(self.map_to(address)?))
+    }
 }
 
 // Unit Tests
 // ----------------------------------------------------------------------------
 #[cfg(test)]
 mod tests {
+    use std::array;
     use super::*;
 
     // AddressRange unit tests
@@ -284,5 +348,69 @@ mod tests {
         let ranges: Vec<[u16; 2]> = vec![[0x0001, 0x0100], [0x0200, 0x02ff]];
         let addr_space = AddressSpace::new(ranges);
         assert_eq!(addr_space.len(), 256 + 256);
+    }
+
+    #[test]
+    fn test_address_space_global_range() {
+        let ranges: Vec<[u16; 2]> = vec![[0x0001, 0x0100], [0x0200, 0x02ff]];
+        let addr_space = AddressSpace::new(ranges);
+        assert_eq!(addr_space.global_range(), AddressRange::new(0x0001, 0x02ff));
+    }
+
+    // MemoryMap unit tests
+    struct TestMap {
+        data: [u8; 10],
+        address_space: AddressSpace<u16>,
+    }
+
+    impl TestMap {
+        pub fn new() -> TestMap {
+            let data: [u8; 10] = array::from_fn(|i| i as u8);
+            let address_space: Vec<[u16; 2]> = vec![[0x0003, 0x0005], [0x0010, 0x0016]];
+            TestMap {
+                data,
+                address_space: AddressSpace::new(address_space),
+            }
+        }
+    }
+
+    impl Index<u16> for TestMap {
+        type Output = u8;
+        fn index(&self, index: u16) -> &Self::Output { &self.data[self.map_to(index).expect("Invalid map index.") as usize] }
+    }
+
+    impl IndexMut<u16> for TestMap {
+        fn index_mut(&mut self, index: u16) -> &mut Self::Output { &mut self.data[self.map_to(index).expect("Invalid map index.") as usize] }
+    }
+
+    impl MemoryMapR<u16, u8> for TestMap {
+        fn address_space(&self) -> &AddressSpace<u16> { &self.address_space }
+    }
+
+    impl MemoryMapRW<u16, u8> for TestMap { }
+
+    #[test]
+    fn test_memory_map_to() {
+        let map = TestMap::new();
+
+        assert!(map.map_to(0x0000).is_err());
+        assert_eq!(map.map_to(0x0003).expect(""), 0x0000);
+        assert_eq!(map.map_to(0x0005).expect(""), 0x0002);
+        assert!(map.map_to(0x0006).is_err());
+        assert!(map.map_to(0x000f).is_err());
+        assert_eq!(map.map_to(0x0010).expect(""), 0x0003);
+        assert_eq!(map.map_to(0x0016).expect(""), 0x0009);
+        assert!(map.map_to(0x0017).is_err());
+    }
+
+    #[test]
+    fn test_memory_map_from() {
+        let map = TestMap::new();
+
+        assert_eq!(map.map_from(0x0000).expect(""), 0x0003);
+        assert_eq!(map.map_from(0x0002).expect(""), 0x0005);
+        assert_eq!(map.map_from(0x0003).expect(""), 0x0010);
+        assert_eq!(map.map_from(0x0009).expect(""), 0x0016);
+        assert!(map.map_from(0x0010).is_err());
     }
 }
